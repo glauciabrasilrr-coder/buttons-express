@@ -7,7 +7,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import ProductIllustration, {
   type ProductIllustrationType,
 } from '../components/ProductIllustration';
-import { supabase } from '../lib/supabase';
+import { supabasePublic } from '../lib/supabase';
 import {
   PRODUCTS,
   formatarMoeda,
@@ -136,7 +136,7 @@ function lerFotosPersistidas(): FotosPersistidas {
 }
 
 async function criarUrlAssinada(caminho: string): Promise<string> {
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .createSignedUrl(caminho, URL_ASSINADA_SEGUNDOS);
 

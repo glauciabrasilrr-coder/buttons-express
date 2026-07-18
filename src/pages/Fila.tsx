@@ -7,7 +7,7 @@ import {
 import JSZip from 'jszip';
 import type { ProductIllustrationType } from '../components/ProductIllustration';
 import { formatarMoeda } from '../data/products';
-import { supabase } from '../lib/supabase';
+import { supabasePublic } from '../lib/supabase';
 import {
   atualizarStatusPedido,
   listarPedidos,
@@ -87,7 +87,7 @@ type FiltroFila =
 
 const BUCKET_FOTOS = 'fotos-pedidos';
 const URL_ASSINADA_SEGUNDOS = 60 * 60 * 24 * 7;
-const INTERVALO_ATUALIZACAO_MS = 3_000;
+const INTERVALO_ATUALIZACAO_MS = 60_000;
 const DURACAO_DESTAQUE_NOVO_MS = 12_000;
 const SOM_STORAGE_KEY = 'buttons-express-som-pedidos';
 
@@ -322,7 +322,7 @@ function limparNomePasta(nome: string): string {
 async function criarUrlAssinada(
   caminho: string,
 ): Promise<string> {
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .createSignedUrl(
       caminho,
@@ -342,7 +342,7 @@ async function baixarArquivo(
   caminho: string,
   nomeDownload: string,
 ): Promise<void> {
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .download(caminho);
 
@@ -490,6 +490,9 @@ function Fila() {
   const [fotosPorPedido, setFotosPorPedido] =
     useState<Record<string, FotoVisual[]>>({});
 
+  const fotosPorPedidoRef =
+    useRef<Record<string, FotoVisual[]>>({});
+
   const [carregando, setCarregando] =
     useState(true);
 
@@ -533,6 +536,10 @@ function Fila() {
   const carregarFotosDosPedidos = async (
     pedidosCarregados: PedidoFila[],
   ) => {
+    if (pedidosCarregados.length === 0) {
+      return;
+    }
+
     const resultado: Record<string, FotoVisual[]> = {};
 
     await Promise.all(
@@ -578,7 +585,16 @@ function Fila() {
       }),
     );
 
-    setFotosPorPedido(resultado);
+    setFotosPorPedido((fotosAtuais) => {
+      const atualizadas = {
+        ...fotosAtuais,
+        ...resultado,
+      };
+
+      fotosPorPedidoRef.current = atualizadas;
+
+      return atualizadas;
+    });
   };
 
   const carregarFila = async (
@@ -608,42 +624,82 @@ function Fila() {
       const pedidosNormalizados =
         pedidosBanco.map(normalizarPedido);
 
-      if (primeiraCargaConcluida.current) {
-        const novosIds = pedidosNormalizados
+      const novosIds = pedidosNormalizados
+        .filter(
+          (pedido) =>
+            !idsPedidosConhecidos.current.has(
+              pedido.id,
+            ),
+        )
+        .map((pedido) => pedido.id);
+
+      if (
+        primeiraCargaConcluida.current &&
+        novosIds.length > 0
+      ) {
+        setPedidosNovos(
+          (atuais) =>
+            new Set([
+              ...atuais,
+              ...novosIds,
+            ]),
+        );
+
+        if (somAtivoRef.current) {
+          tocarSomNovoPedido();
+        }
+
+        window.setTimeout(() => {
+          setPedidosNovos((atuais) => {
+            const atualizados = new Set(atuais);
+
+            novosIds.forEach((id) => {
+              atualizados.delete(id);
+            });
+
+            return atualizados;
+          });
+        }, DURACAO_DESTAQUE_NOVO_MS);
+      }
+
+      const idsAtivos = new Set(
+        pedidosNormalizados
           .filter(
             (pedido) =>
-              !idsPedidosConhecidos.current.has(
-                pedido.id,
-              ),
+              pedido.status !== 'entregue',
           )
-          .map((pedido) => pedido.id);
+          .map((pedido) => pedido.id),
+      );
 
-        if (novosIds.length > 0) {
-          setPedidosNovos(
-            (atuais) =>
-              new Set([
-                ...atuais,
-                ...novosIds,
-              ]),
-          );
+      setFotosPorPedido((fotosAtuais) => {
+        const atualizadas: Record<
+          string,
+          FotoVisual[]
+        > = {};
 
-          if (somAtivoRef.current) {
-            tocarSomNovoPedido();
+        for (
+          const [pedidoId, fotos] of
+          Object.entries(fotosAtuais)
+        ) {
+          if (idsAtivos.has(pedidoId)) {
+            atualizadas[pedidoId] = fotos;
           }
-
-          window.setTimeout(() => {
-            setPedidosNovos((atuais) => {
-              const atualizados = new Set(atuais);
-
-              novosIds.forEach((id) => {
-                atualizados.delete(id);
-              });
-
-              return atualizados;
-            });
-          }, DURACAO_DESTAQUE_NOVO_MS);
         }
-      }
+
+        fotosPorPedidoRef.current = atualizadas;
+
+        return atualizadas;
+      });
+
+      const pedidosSemFotosCarregadas =
+        pedidosNormalizados.filter(
+          (pedido) =>
+            pedido.status !== 'entregue' &&
+            !Object.prototype.hasOwnProperty.call(
+              fotosPorPedidoRef.current,
+              pedido.id,
+            ),
+        );
 
       idsPedidosConhecidos.current = new Set(
         pedidosNormalizados.map(
@@ -654,7 +710,7 @@ function Fila() {
       setPedidos(pedidosNormalizados);
 
       await carregarFotosDosPedidos(
-        pedidosNormalizados,
+        pedidosSemFotosCarregadas,
       );
 
       setUltimaAtualizacao(new Date());
@@ -678,12 +734,28 @@ function Fila() {
   useEffect(() => {
     void carregarFila(true);
 
-    const intervalo = window.setInterval(() => {
-      void carregarFila(false);
-    }, INTERVALO_ATUALIZACAO_MS);
+    const atualizarSeVisivel = () => {
+      if (document.visibilityState === 'visible') {
+        void carregarFila(false);
+      }
+    };
+
+    const intervalo = window.setInterval(
+      atualizarSeVisivel,
+      INTERVALO_ATUALIZACAO_MS,
+    );
+
+    document.addEventListener(
+      'visibilitychange',
+      atualizarSeVisivel,
+    );
 
     return () => {
       window.clearInterval(intervalo);
+      document.removeEventListener(
+        'visibilitychange',
+        atualizarSeVisivel,
+      );
     };
   }, []);
 
@@ -858,28 +930,13 @@ function Fila() {
     ).length;
 
   const pagamentosConfirmados =
-    pedidos.filter(
-      (pedido) =>
-        pedido.status === 'pago' ||
-        pedido.status === 'em-producao' ||
-        pedido.status === 'pronto' ||
-        pedido.status === 'entregue',
-    ).length;
+    pagamentosConfirmadosAtuais;
 
   const producaoIniciada =
-    pedidos.filter(
-      (pedido) =>
-        pedido.status === 'em-producao' ||
-        pedido.status === 'pronto' ||
-        pedido.status === 'entregue',
-    ).length;
+    emProducaoAtuais;
 
   const pedidosProntos =
-    pedidos.filter(
-      (pedido) =>
-        pedido.status === 'pronto' ||
-        pedido.status === 'entregue',
-    ).length;
+    prontosAtuais;
 
   const avancarPedido = async (
     pedido: PedidoFila,
@@ -957,6 +1014,7 @@ function Fila() {
           };
 
           delete atualizadas[pedido.id];
+          fotosPorPedidoRef.current = atualizadas;
 
           return atualizadas;
         },
@@ -1036,7 +1094,7 @@ function Fila() {
       const contadoresPorProduto: Record<string, number> = {};
 
       for (const foto of fotos) {
-        const { data, error } = await supabase.storage
+        const { data, error } = await supabasePublic.storage
           .from(BUCKET_FOTOS)
           .download(foto.storagePath);
 
@@ -1217,6 +1275,7 @@ function Fila() {
       );
 
       setPedidos([]);
+      fotosPorPedidoRef.current = {};
       setFotosPorPedido({});
     } catch (erroLimpeza) {
       console.error(

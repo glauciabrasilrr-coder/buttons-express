@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
 } from 'react';
@@ -8,7 +9,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import ProductIllustration, {
   type ProductIllustrationType,
 } from '../components/ProductIllustration';
-import { supabase } from '../lib/supabase';
+import { supabasePublic } from '../lib/supabase';
 
 type ItemPedido = {
   id: string;
@@ -58,6 +59,27 @@ const FOTOS_STORAGE_KEY = 'buttons-express-fotos-supabase';
 const RASCUNHO_STORAGE_KEY = 'buttons-express-rascunho-id';
 const BUCKET_FOTOS = 'fotos-pedidos';
 const URL_ASSINADA_SEGUNDOS = 60 * 60 * 24 * 7;
+
+function obterMensagemErro(erro: unknown): string {
+  if (erro instanceof Error) {
+    return erro.message;
+  }
+
+  if (
+    erro &&
+    typeof erro === 'object' &&
+    'message' in erro &&
+    typeof erro.message === 'string'
+  ) {
+    return erro.message;
+  }
+
+  try {
+    return JSON.stringify(erro);
+  } catch {
+    return String(erro);
+  }
+}
 
 function lerPedidoSalvo(): ItemPedido[] {
   try {
@@ -151,7 +173,7 @@ function criarCaminhoFoto(
 }
 
 async function criarUrlAssinada(caminho: string): Promise<string> {
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .createSignedUrl(caminho, URL_ASSINADA_SEGUNDOS);
 
@@ -166,7 +188,7 @@ async function enviarFotoStorage(
   caminho: string,
   arquivo: File | Blob,
 ): Promise<string> {
-  const { error } = await supabase.storage
+  const { error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .upload(caminho, arquivo, {
       cacheControl: '3600',
@@ -186,7 +208,7 @@ async function removerFotoStorage(caminho: string | null): Promise<void> {
     return;
   }
 
-  const { error } = await supabase.storage
+  const { error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .remove([caminho]);
 
@@ -196,7 +218,7 @@ async function removerFotoStorage(caminho: string | null): Promise<void> {
 }
 
 async function baixarFotoStorage(caminho: string): Promise<Blob> {
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
     .download(caminho);
 
@@ -233,6 +255,21 @@ function Fotos() {
   const location = useLocation();
   const state = location.state as LocationState | null;
   const rascunhoId = useMemo(() => obterRascunhoId(), []);
+
+  const inputFotosRef = useRef<
+    Record<string, HTMLInputElement | null>
+  >({});
+
+  const abrirSeletorDeFoto = (fotoId: string) => {
+    const input = inputFotosRef.current[fotoId];
+
+    if (!input) {
+      return;
+    }
+
+    input.value = '';
+    input.click();
+  };
 
   const itensPedido = useMemo(() => {
     if (state?.itens && state.itens.length > 0) {
@@ -481,8 +518,10 @@ function Fotos() {
         ),
       );
 
+      const mensagemErro = obterMensagemErro(erro);
+
       window.alert(
-        'Não foi possível enviar essa imagem para o servidor. Tente novamente.',
+        `Não foi possível enviar essa imagem para o servidor.\n\nDetalhe técnico: ${mensagemErro}`,
       );
     }
   };
@@ -574,7 +613,7 @@ function Fotos() {
         .filter((caminho): caminho is string => Boolean(caminho));
 
       if (caminhos.length > 0) {
-        const { error } = await supabase.storage
+        const { error } = await supabasePublic.storage
           .from(BUCKET_FOTOS)
           .remove(caminhos);
 
@@ -927,12 +966,25 @@ function Fotos() {
                             </div>
 
                             <div className="mt-2 grid grid-cols-2 gap-2">
-                              <label className="flex h-9 cursor-pointer items-center justify-center rounded-full border border-[#E9DDCC] bg-white text-xs font-bold text-[#6B3E14]">
-                                ALTERAR
+                              <div className="relative">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    abrirSeletorDeFoto(foto.id)
+                                  }
+                                  className="flex h-9 w-full items-center justify-center rounded-full border border-[#E9DDCC] bg-white text-xs font-bold text-[#6B3E14]"
+                                >
+                                  ALTERAR
+                                </button>
+
                                 <input
+                                  ref={(elemento) => {
+                                    inputFotosRef.current[foto.id] =
+                                      elemento;
+                                  }}
                                   type="file"
                                   accept="image/*"
-                                  className="hidden"
+                                  className="absolute -left-[9999px] top-0 h-px w-px opacity-0"
                                   onChange={(event) =>
                                     void adicionarFoto(
                                       grupoIndex,
@@ -941,7 +993,7 @@ function Fotos() {
                                     )
                                   }
                                 />
-                              </label>
+                              </div>
 
                               <button
                                 type="button"
@@ -959,11 +1011,41 @@ function Fotos() {
                           </div>
                         </>
                       ) : (
-                        <label className="flex min-h-[168px] cursor-pointer flex-col items-center justify-center border-2 border-dashed border-[#D9C1A4] bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF7ED_100%)] p-4 text-center transition hover:border-[#8F5528] hover:bg-[#FFF3E5] sm:aspect-square sm:min-h-0">
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              abrirSeletorDeFoto(foto.id)
+                            }
+                            className="flex min-h-[168px] w-full cursor-pointer flex-col items-center justify-center overflow-hidden border-2 border-dashed border-[#D9C1A4] bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF7ED_100%)] p-4 text-center transition active:scale-[0.99] hover:border-[#8F5528] hover:bg-[#FFF3E5] sm:aspect-square sm:min-h-0"
+                          >
+                            <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[#E9DDCC] bg-white shadow-sm">
+                              <div className="w-10">
+                                <ProductIllustration productType="upload" />
+                              </div>
+                            </div>
+
+                            <div className="mt-3 text-sm font-extrabold text-[#4A2A12]">
+                              Toque para enviar
+                            </div>
+
+                            <div className="mt-1 text-xs font-semibold text-[#8A5A2B]">
+                              Foto {fotoIndex + 1}
+                            </div>
+
+                            <div className="mt-1 text-[10px] text-[#9A8067]">
+                              JPG, PNG ou HEIC · até 10 MB
+                            </div>
+                          </button>
+
                           <input
+                            ref={(elemento) => {
+                              inputFotosRef.current[foto.id] =
+                                elemento;
+                            }}
                             type="file"
                             accept="image/*"
-                            className="hidden"
+                            className="absolute -left-[9999px] top-0 h-px w-px opacity-0"
                             onChange={(event) =>
                               void adicionarFoto(
                                 grupoIndex,
@@ -972,25 +1054,7 @@ function Fotos() {
                               )
                             }
                           />
-
-                          <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[#E9DDCC] bg-white shadow-sm">
-                            <div className="w-10">
-                              <ProductIllustration productType="upload" />
-                            </div>
-                          </div>
-
-                          <div className="mt-3 text-sm font-extrabold text-[#4A2A12]">
-                            Toque para enviar
-                          </div>
-
-                          <div className="mt-1 text-xs font-semibold text-[#8A5A2B]">
-                            Foto {fotoIndex + 1}
-                          </div>
-
-                          <div className="mt-1 text-[10px] text-[#9A8067]">
-                            JPG, PNG ou HEIC · até 10 MB
-                          </div>
-                        </label>
+                        </div>
                       )}
                     </article>
                   ))}

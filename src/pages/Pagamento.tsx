@@ -66,6 +66,21 @@ type GrupoFotoSalvo = {
 };
 
 const PEDIDO_STORAGE_KEY = 'buttons-express-pedido';
+const CONFIG_STORAGE_KEY = 'buttons-express-fotos-config';
+const FOTOS_STORAGE_KEY = 'buttons-express-fotos-supabase';
+const RASCUNHO_STORAGE_KEY = 'buttons-express-rascunho-id';
+const STORAGE_ANTIGO_KEY = 'buttons-express-fotos';
+
+type FotoPersistida = {
+  id: string;
+  fileName: string;
+  storagePath: string;
+  editado: boolean;
+};
+
+type FotosPersistidas = Record<string, FotoPersistida>;
+
+type ConfiguracaoFotos = Record<string, boolean>;
 
 function lerPedidoSalvo(): ItemPedido[] {
   try {
@@ -103,6 +118,109 @@ function lerPedidoSalvo(): ItemPedido[] {
   } catch {
     return [];
   }
+}
+
+function lerFotosPersistidas(): FotosPersistidas {
+  try {
+    const salvo = localStorage.getItem(FOTOS_STORAGE_KEY);
+
+    if (!salvo) {
+      return {};
+    }
+
+    const dados = JSON.parse(salvo);
+
+    return dados && typeof dados === 'object'
+      ? dados
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function lerConfiguracaoFotos(): ConfiguracaoFotos {
+  try {
+    const salvo = localStorage.getItem(CONFIG_STORAGE_KEY);
+
+    if (!salvo) {
+      return {};
+    }
+
+    const dados = JSON.parse(salvo);
+
+    return dados && typeof dados === 'object'
+      ? dados
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function limparDadosDoPedidoAtual(): void {
+  localStorage.removeItem(PEDIDO_STORAGE_KEY);
+  localStorage.removeItem(CONFIG_STORAGE_KEY);
+  localStorage.removeItem(FOTOS_STORAGE_KEY);
+  localStorage.removeItem(RASCUNHO_STORAGE_KEY);
+  localStorage.removeItem(STORAGE_ANTIGO_KEY);
+}
+
+function montarGruposComCaminhos(
+  gruposRecebidos: GrupoFoto[],
+  itens: ItemPedido[],
+): GrupoFoto[] {
+  const fotosPersistidas = lerFotosPersistidas();
+  const configuracao = lerConfiguracaoFotos();
+
+  const gruposBase =
+    gruposRecebidos.length > 0
+      ? gruposRecebidos
+      : itens.map((item) => ({
+          id: item.id,
+          title: item.title,
+          quantidade: item.quantidade,
+          illustration: item.illustration,
+          usarMesmaFoto:
+            configuracao[item.id] ?? false,
+          fotos: Array.from(
+            { length: item.quantidade },
+            (_, index) => ({
+              id: `${item.id}-${index + 1}`,
+              fileName: '',
+              previewUrl: null,
+              storagePath: null,
+              editado: false,
+              carregando: false,
+            }),
+          ),
+        }));
+
+  return gruposBase.map((grupo) => ({
+    ...grupo,
+    usarMesmaFoto:
+      configuracao[grupo.id] ??
+      grupo.usarMesmaFoto ??
+      false,
+    fotos: grupo.fotos.map((foto) => {
+      const persistida = fotosPersistidas[foto.id];
+
+      return {
+        ...foto,
+        fileName:
+          foto.fileName ||
+          persistida?.fileName ||
+          '',
+        storagePath:
+          foto.storagePath ??
+          persistida?.storagePath ??
+          null,
+        editado:
+          foto.editado ??
+          persistida?.editado ??
+          false,
+        carregando: false,
+      };
+    }),
+  }));
 }
 
 function prepararGruposParaSalvar(
@@ -203,8 +321,12 @@ function Pagamento() {
   }, [state]);
 
   const gruposFotos = useMemo(
-    () => state?.gruposFotos ?? [],
-    [state],
+    () =>
+      montarGruposComCaminhos(
+        state?.gruposFotos ?? [],
+        itensPedido,
+      ),
+    [itensPedido, state],
   );
 
   const totalUnidades = useMemo(
@@ -218,16 +340,20 @@ function Pagamento() {
     [itensPedido, state],
   );
 
-  const totalFotos =
-    state?.totalFotos ??
-    gruposFotos.reduce(
-      (total, grupo) =>
-        total +
-        grupo.fotos.filter(
-          (foto) => foto.storagePath,
-        ).length,
-      0,
-    );
+  const totalFotos = gruposFotos.reduce(
+    (total, grupo) =>
+      total +
+      grupo.fotos.filter(
+        (foto) => Boolean(foto.storagePath),
+      ).length,
+    0,
+  );
+
+  const totalFotosEsperadas = gruposFotos.reduce(
+    (total, grupo) =>
+      total + grupo.fotos.length,
+    0,
+  );
 
   const totalPedido = useMemo(
     () =>
@@ -242,6 +368,24 @@ function Pagamento() {
 
   const confirmarPagamento = async () => {
     if (!formaSelecionada || salvandoPedido) {
+      return;
+    }
+
+    if (
+      totalFotosEsperadas === 0 ||
+      totalFotos !== totalFotosEsperadas
+    ) {
+      window.alert(
+        'As fotos deste pedido não foram salvas corretamente. Volte para a tela de fotos e envie novamente antes de finalizar.',
+      );
+
+      navigate('/fotos', {
+        state: {
+          itens: itensPedido,
+          totalItens: totalUnidades,
+        },
+      });
+
       return;
     }
 
@@ -275,6 +419,8 @@ function Pagamento() {
           totalPedido,
         },
       });
+
+      limparDadosDoPedidoAtual();
 
       navigate('/obrigado', {
         state: {
