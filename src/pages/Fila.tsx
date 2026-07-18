@@ -87,7 +87,7 @@ type FiltroFila =
 
 const BUCKET_FOTOS = 'fotos-pedidos';
 const URL_ASSINADA_SEGUNDOS = 60 * 60 * 24 * 7;
-const INTERVALO_ATUALIZACAO_MS = 60_000;
+const INTERVALO_ATUALIZACAO_MS = 10_000;
 const DURACAO_DESTAQUE_NOVO_MS = 12_000;
 const SOM_STORAGE_KEY = 'buttons-express-som-pedidos';
 
