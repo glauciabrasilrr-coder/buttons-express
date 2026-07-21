@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ProductIllustration, {
   type ProductIllustrationType,
@@ -13,6 +13,10 @@ import {
   formatarMoeda,
   type ProductId,
 } from '../data/products';
+import {
+  criarCobrancaPix,
+  consultarStatusPagamento,
+} from '../services/pagamentos';
 
 type ItemPedido = {
   id: ProductId;
@@ -312,6 +316,27 @@ function Pagamento() {
   const [salvandoPedido, setSalvandoPedido] =
     useState(false);
 
+  const [aguardandoPix, setAguardandoPix] =
+    useState(false);
+
+  const [pixInfo, setPixInfo] = useState<{
+    paymentId: number;
+    qrCode: string | null;
+    qrCodeBase64: string | null;
+  } | null>(null);
+
+  const [pixPedido, setPixPedido] = useState<{
+    codigo: string;
+    id: string;
+  } | null>(null);
+
+  const [erroPix, setErroPix] = useState<
+    string | null
+  >(null);
+
+  const [codigoPixCopiado, setCodigoPixCopiado] =
+    useState(false);
+
   const itensPedido = useMemo(() => {
     if (state?.itens && state.itens.length > 0) {
       return state.itens;
@@ -389,6 +414,7 @@ function Pagamento() {
       return;
     }
 
+    setErroPix(null);
     setSalvandoPedido(true);
 
     try {
@@ -420,6 +446,45 @@ function Pagamento() {
         },
       });
 
+      // Pix: gera a cobrança automática e fica nesta mesma tela
+      // aguardando o pagamento cair sozinho (sem navegar ainda).
+      if (formaSelecionada === 'pix') {
+        try {
+          const cobranca = await criarCobrancaPix(
+            pedidoSalvo.codigo,
+            totalPedido,
+          );
+
+          setPixPedido({
+            codigo: pedidoSalvo.codigo,
+            id: pedidoSalvo.id,
+          });
+
+          setPixInfo({
+            paymentId: cobranca.paymentId,
+            qrCode: cobranca.pix?.qrCode ?? null,
+            qrCodeBase64:
+              cobranca.pix?.qrCodeBase64 ?? null,
+          });
+
+          setAguardandoPix(true);
+        } catch (erroPixCobranca) {
+          console.error(
+            'Erro ao gerar cobrança Pix:',
+            erroPixCobranca,
+          );
+
+          setErroPix(
+            'Não foi possível gerar o Pix agora. O pedido já foi registrado — você pode tentar novamente ou pagar no caixa.',
+          );
+        }
+
+        setSalvandoPedido(false);
+        return;
+      }
+
+      // Cartão de crédito/débito e dinheiro seguem como antes:
+      // pagamento é feito no caixa e confirmado manualmente.
       limparDadosDoPedidoAtual();
 
       navigate('/obrigado', {
@@ -452,6 +517,130 @@ function Pagamento() {
       setSalvandoPedido(false);
     }
   };
+
+  // Fica perguntando ao servidor, a cada poucos segundos, se o Pix
+  // já caiu. Quando aprovado, segue o mesmo caminho de sempre pra
+  // tela de "Obrigado" — só que já confirmado, sem ninguém clicar em nada.
+  useEffect(() => {
+    if (!aguardandoPix || !pixInfo?.paymentId) {
+      return;
+    }
+
+    const intervalo = window.setInterval(async () => {
+      try {
+        const status = await consultarStatusPagamento(
+          pixInfo.paymentId,
+        );
+
+        if (status === 'approved') {
+          window.clearInterval(intervalo);
+          limparDadosDoPedidoAtual();
+
+          navigate('/obrigado', {
+            state: {
+              itens: itensPedido,
+              gruposFotos,
+              totalItens: totalUnidades,
+              totalFotos,
+              totalPedido,
+              formaPagamento: 'pix',
+              statusPagamento: 'confirmado',
+              codigoPedido: pixPedido?.codigo,
+              pedidoId: pixPedido?.id,
+              statusPedido: 'pago',
+            },
+          });
+        } else if (
+          status === 'rejected' ||
+          status === 'cancelled'
+        ) {
+          window.clearInterval(intervalo);
+          setAguardandoPix(false);
+          setErroPix(
+            'O pagamento não foi aprovado. Tente novamente ou escolha outra forma de pagamento.',
+          );
+        }
+      } catch (erroConsulta) {
+        console.error(
+          'Erro ao consultar status do Pix:',
+          erroConsulta,
+        );
+      }
+    }, 4000);
+
+    return () => window.clearInterval(intervalo);
+  }, [
+    aguardandoPix,
+    pixInfo,
+    pixPedido,
+    navigate,
+    itensPedido,
+    gruposFotos,
+    totalUnidades,
+    totalFotos,
+    totalPedido,
+  ]);
+
+  if (aguardandoPix && pixInfo) {
+    return (
+      <div className="mx-auto w-full max-w-md rounded-[28px] border border-[#E9DDCC] bg-white p-6 text-center shadow-sm">
+        <h1 className="text-xl font-bold text-[#4A2A12]">
+          Pague com Pix
+        </h1>
+
+        <p className="mt-2 text-sm leading-6 text-[#7B5A3A]">
+          Abra o app do seu banco e escaneie o QR Code, ou use o
+          código "copia e cola" abaixo. Assim que o pagamento cair,
+          seu pedido segue sozinho para a produção.
+        </p>
+
+        {pixInfo.qrCodeBase64 && (
+          <img
+            src={`data:image/png;base64,${pixInfo.qrCodeBase64}`}
+            alt="QR Code Pix"
+            className="mx-auto mt-5 h-56 w-56 rounded-2xl border border-[#E9DDCC]"
+          />
+        )}
+
+        {pixInfo.qrCode && (
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard
+                .writeText(pixInfo.qrCode ?? '')
+                .catch(() => undefined);
+              setCodigoPixCopiado(true);
+              window.setTimeout(
+                () => setCodigoPixCopiado(false),
+                2500,
+              );
+            }}
+            className="mt-4 h-11 w-full rounded-full border border-[#8F5528] text-sm font-bold text-[#6B3E14]"
+          >
+            {codigoPixCopiado
+              ? 'CÓDIGO COPIADO!'
+              : 'COPIAR CÓDIGO PIX'}
+          </button>
+        )}
+
+        <div className="mt-5 flex items-center justify-center gap-2 text-sm font-semibold text-[#8A5A2B]">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-[#8F5528]" />
+          Aguardando confirmação do pagamento...
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAguardandoPix(false);
+            setPixInfo(null);
+          }}
+          className="mt-6 text-xs font-bold text-[#8A5A2B] underline"
+        >
+          Cancelar e escolher outra forma
+        </button>
+      </div>
+    );
+  }
 
   if (itensPedido.length === 0) {
     return (
@@ -512,6 +701,12 @@ function Pagamento() {
           </div>
         </div>
       </header>
+
+      {erroPix && (
+        <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
+          {erroPix}
+        </div>
+      )}
 
       <section className="mb-5 rounded-[24px] border-2 border-[#8F5528] bg-white p-4 text-center shadow-[0_12px_26px_rgba(107,62,20,0.08)] sm:p-5">
         <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-[#B59677]">
