@@ -15,8 +15,10 @@ import {
 } from '../data/products';
 import {
   criarCobrancaPix,
+  criarCobrancaCartao,
   consultarStatusPagamento,
 } from '../services/pagamentos';
+import CardPaymentBrick from '../components/CardPaymentBrick';
 
 type ItemPedido = {
   id: ProductId;
@@ -337,6 +339,25 @@ function Pagamento() {
   const [codigoPixCopiado, setCodigoPixCopiado] =
     useState(false);
 
+  const [mostrarFormularioCartao, setMostrarFormularioCartao] =
+    useState(false);
+
+  const [cartaoPedido, setCartaoPedido] = useState<{
+    codigo: string;
+    id: string;
+  } | null>(null);
+
+  const [processandoCartao, setProcessandoCartao] =
+    useState(false);
+
+  const [paymentIdCartao, setPaymentIdCartao] = useState<
+    number | null
+  >(null);
+
+  const [erroCartao, setErroCartao] = useState<
+    string | null
+  >(null);
+
   const itensPedido = useMemo(() => {
     if (state?.itens && state.itens.length > 0) {
       return state.itens;
@@ -483,8 +504,25 @@ function Pagamento() {
         return;
       }
 
-      // Cartão de crédito/débito e dinheiro seguem como antes:
-      // pagamento é feito no caixa e confirmado manualmente.
+      // Cartão de crédito/débito: mostra o formulário seguro do
+      // Mercado Pago nesta mesma tela, em vez de mandar pro caixa.
+      if (
+        formaSelecionada === 'credito' ||
+        formaSelecionada === 'debito'
+      ) {
+        setCartaoPedido({
+          codigo: pedidoSalvo.codigo,
+          id: pedidoSalvo.id,
+        });
+
+        setErroCartao(null);
+        setMostrarFormularioCartao(true);
+        setSalvandoPedido(false);
+        return;
+      }
+
+      // Dinheiro segue como antes: pago no caixa e confirmado
+      // manualmente pela produção.
       limparDadosDoPedidoAtual();
 
       navigate('/obrigado', {
@@ -581,6 +619,139 @@ function Pagamento() {
     totalPedido,
   ]);
 
+  // Chamado pelo formulário seguro de cartão (Brick) quando o
+  // cliente finaliza o preenchimento.
+  const processarPagamentoCartao = async (dados: {
+    token: string;
+    paymentMethodId: string;
+    issuerId: string;
+    installments: number;
+  }) => {
+    if (!cartaoPedido) {
+      setErroCartao(
+        'Pedido não encontrado para o pagamento com cartão.',
+      );
+      return;
+    }
+
+    try {
+      const resposta = await criarCobrancaCartao(
+        cartaoPedido.codigo,
+        totalPedido,
+        dados.token,
+        dados.paymentMethodId,
+        dados.issuerId,
+        dados.installments,
+      );
+
+      if (resposta.status === 'approved') {
+        limparDadosDoPedidoAtual();
+
+        navigate('/obrigado', {
+          state: {
+            itens: itensPedido,
+            gruposFotos,
+            totalItens: totalUnidades,
+            totalFotos,
+            totalPedido,
+            formaPagamento: formaSelecionada,
+            statusPagamento: 'confirmado',
+            codigoPedido: cartaoPedido.codigo,
+            pedidoId: cartaoPedido.id,
+            statusPedido: 'pago',
+          },
+        });
+
+        return;
+      }
+
+      if (
+        resposta.status === 'rejected' ||
+        resposta.status === 'cancelled'
+      ) {
+        setErroCartao(
+          'O cartão foi recusado. Tente novamente com outro cartão, ou escolha outra forma de pagamento.',
+        );
+
+        return;
+      }
+
+      // 'in_process' ou 'pending' — aguarda a confirmação chegar
+      setPaymentIdCartao(resposta.paymentId);
+      setProcessandoCartao(true);
+    } catch (erroCobranca) {
+      console.error(
+        'Erro ao processar pagamento com cartão:',
+        erroCobranca,
+      );
+
+      setErroCartao(
+        'Não foi possível processar o cartão agora. Tente novamente ou escolha outra forma de pagamento.',
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!processandoCartao || !paymentIdCartao) {
+      return;
+    }
+
+    const intervaloCartao = window.setInterval(async () => {
+      try {
+        const status = await consultarStatusPagamento(
+          paymentIdCartao,
+        );
+
+        if (status === 'approved') {
+          window.clearInterval(intervaloCartao);
+          limparDadosDoPedidoAtual();
+
+          navigate('/obrigado', {
+            state: {
+              itens: itensPedido,
+              gruposFotos,
+              totalItens: totalUnidades,
+              totalFotos,
+              totalPedido,
+              formaPagamento: formaSelecionada,
+              statusPagamento: 'confirmado',
+              codigoPedido: cartaoPedido?.codigo,
+              pedidoId: cartaoPedido?.id,
+              statusPedido: 'pago',
+            },
+          });
+        } else if (
+          status === 'rejected' ||
+          status === 'cancelled'
+        ) {
+          window.clearInterval(intervaloCartao);
+          setProcessandoCartao(false);
+          setErroCartao(
+            'O cartão foi recusado. Tente novamente com outro cartão, ou escolha outra forma de pagamento.',
+          );
+        }
+      } catch (erroConsulta) {
+        console.error(
+          'Erro ao consultar status do cartão:',
+          erroConsulta,
+        );
+      }
+    }, 4000);
+
+    return () => window.clearInterval(intervaloCartao);
+  }, [
+    processandoCartao,
+    paymentIdCartao,
+    cartaoPedido,
+    formaSelecionada,
+    navigate,
+    itensPedido,
+    gruposFotos,
+    totalUnidades,
+    totalFotos,
+    totalPedido,
+  ]);
+
   if (aguardandoPix && pixInfo) {
     return (
       <div className="mx-auto w-full max-w-md rounded-[28px] border border-[#E9DDCC] bg-white p-6 text-center shadow-sm">
@@ -635,6 +806,57 @@ function Pagamento() {
             setPixInfo(null);
           }}
           className="mt-6 text-xs font-bold text-[#8A5A2B] underline"
+        >
+          Cancelar e escolher outra forma
+        </button>
+      </div>
+    );
+  }
+
+  if (mostrarFormularioCartao && cartaoPedido) {
+    return (
+      <div className="mx-auto w-full max-w-md rounded-[28px] border border-[#E9DDCC] bg-white p-6 shadow-sm">
+        <h1 className="text-center text-xl font-bold text-[#4A2A12]">
+          {formaSelecionada === 'debito'
+            ? 'Pagamento no cartão de débito'
+            : 'Pagamento no cartão de crédito'}
+        </h1>
+
+        <p className="mt-2 text-center text-sm leading-6 text-[#7B5A3A]">
+          Preencha os dados do cartão com segurança. Assim que o
+          pagamento for aprovado, seu pedido segue direto para a
+          produção.
+        </p>
+
+        {erroCartao && (
+          <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
+            {erroCartao}
+          </div>
+        )}
+
+        {processandoCartao ? (
+          <div className="mt-6 flex items-center justify-center gap-2 text-sm font-semibold text-[#8A5A2B]">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-[#8F5528]" />
+            Confirmando pagamento...
+          </div>
+        ) : (
+          <div className="mt-5">
+            <CardPaymentBrick
+              valor={totalPedido}
+              onPagamentoCriado={processarPagamentoCartao}
+              onErro={(mensagem) => setErroCartao(mensagem)}
+            />
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => {
+            setMostrarFormularioCartao(false);
+            setProcessandoCartao(false);
+            setErroCartao(null);
+          }}
+          className="mt-6 w-full text-xs font-bold text-[#8A5A2B] underline"
         >
           Cancelar e escolher outra forma
         </button>
