@@ -10,6 +10,7 @@ import ProductIllustration, {
   type ProductIllustrationType,
 } from '../components/ProductIllustration';
 import { supabasePublic } from '../lib/supabase';
+import { comprimirImagem } from '../lib/comprimirImagem';
 
 type ItemPedido = {
   id: string;
@@ -188,12 +189,20 @@ async function enviarFotoStorage(
   caminho: string,
   arquivo: File | Blob,
 ): Promise<string> {
+  // Reduz o tamanho da foto antes de subir — upload mais rápido em
+  // wifi de feira e bem menos consumo de cota no Supabase. Se for um
+  // Blob (foto reaproveitada de outro item), já foi comprimida antes.
+  const arquivoParaEnvio =
+    arquivo instanceof File
+      ? await comprimirImagem(arquivo)
+      : arquivo;
+
   const { error } = await supabasePublic.storage
     .from(BUCKET_FOTOS)
-    .upload(caminho, arquivo, {
+    .upload(caminho, arquivoParaEnvio, {
       cacheControl: '3600',
       upsert: false,
-      contentType: arquivo.type || undefined,
+      contentType: arquivoParaEnvio.type || undefined,
     });
 
   if (error) {
